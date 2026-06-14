@@ -180,7 +180,7 @@ flowchart LR
 - **Tool:** Cursor / Claude
 - **Input:** Documents table, Chunking Strategy section, and `requirements.txt`
 - **Expected output:** `ingest.py` (or similar) that loads all `.txt` files, applies recursive chunking with 400/60 settings, one-chunk-per-building for rates, one-chunk-per-review for RoomSurf, and returns chunk objects with metadata
-- **Verify:** print chunk count (~80–120), spot-check that Kerr Hall rates stay in one chunk, and that each dorm review is a single chunk
+- **Verify:** print chunk count (~80-120), spot-check that Kerr Hall rates stay in one chunk, and that each dorm review is a single chunk
 
 **Milestone 4 — Embedding and retrieval:**
 
