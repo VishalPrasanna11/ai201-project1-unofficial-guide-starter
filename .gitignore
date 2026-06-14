@@ -16,5 +16,8 @@ env/
 chroma_db/
 chroma/
 
+# Generated cleaned documents (Milestone 3)
+data/cleaned/
+
 # macOS
 .DS_Store
