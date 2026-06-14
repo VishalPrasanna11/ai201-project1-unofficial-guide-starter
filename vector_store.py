@@ -119,3 +119,11 @@ def retrieve(query: str, k: int = DEFAULT_TOP_K) -> list[dict]:
             }
         )
     return hits
+
+
+def ensure_index() -> None:
+    """Build the vector index if the collection is empty."""
+    if get_collection().count() == 0:
+        from ingest import build_chunks, load_documents
+
+        build_index(build_chunks(load_documents()), reset=True)
