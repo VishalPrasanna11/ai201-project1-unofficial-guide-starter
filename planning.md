@@ -73,7 +73,7 @@ For the two outliers, I'll handle them differently:
 
 **Before chunking:** strip extra whitespace and tag each chunk with source info (filename, section or building name) so retrieval answers can cite where things came from.
 
-**Expected chunk count:** roughly 80–120 chunks across all documents.
+**Expected chunk count:** roughly 80-120 chunks across all documents.
 
 **Final chunk count (after implementation):** 144 chunks from 11 documents (104 from room_rates building entries, 8 dorm reviews, 32 from recursive split on policy/guide files).
 
