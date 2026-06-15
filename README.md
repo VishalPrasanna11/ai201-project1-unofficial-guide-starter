@@ -4,6 +4,67 @@ A retrieval-augmented generation (RAG) assistant for **Northeastern University H
 
 ---
 
+## Quick Start
+
+**Prerequisites:** Python 3.10+, a free [Groq API key](https://console.groq.com) (no credit card required).
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Configure Groq API key
+cp .env.example .env
+# Edit .env and set GROQ_API_KEY=your_key_here
+
+# 3. Launch the Gradio UI (builds the ChromaDB index on first run)
+python app.py
+```
+
+Open http://localhost:7860 and ask a question. The app calls `ensure_index()` at startup — if `chroma_db/` is empty, it chunks and embeds all 11 documents automatically.
+
+**Other commands:**
+
+| Command | Purpose |
+|---------|---------|
+| `python ingest.py` | Inspect chunking output (144 chunks across 11 docs) |
+| `python -c "from vector_store import build_index; from ingest import build_chunks, load_documents; build_index(build_chunks(load_documents()), reset=True)"` | Rebuild the vector index from scratch |
+| `python test_retrieval.py` | Run retrieval-only evaluation (no Groq API calls) |
+| `python test_generation.py` | Run all 5 in-domain + 1 out-of-domain end-to-end tests |
+
+---
+
+## Project Structure
+
+| File | Role |
+|------|------|
+| `documents/` | 11 plain-text housing sources (official NU pages + RoomSurf reviews) |
+| `ingest.py` | Load, clean, and chunk documents |
+| `chunking.py` | Recursive split + special handlers for rates and reviews |
+| `models.py` | `Document` and `Chunk` dataclasses |
+| `vector_store.py` | Embed with MiniLM, store in ChromaDB, retrieve top-k |
+| `query.py` | Grounded Groq generation with distance filter |
+| `app.py` | Gradio web UI |
+| `test_retrieval.py` / `test_generation.py` | Evaluation scripts |
+| `planning.md` | Pre-implementation spec (domain, chunking, eval plan) |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A["Document Ingestion\n(.txt files in documents/)\nPython stdlib"] --> B["Chunking\nRecursive split + special rules\ncustom Python"]
+    B --> C["Embedding\nall-MiniLM-L6-v2\nsentence-transformers"]
+    C --> D["Vector Store\nChromaDB\n(persistent collection)"]
+    E["User Question"] --> F["Query Embedding\nsentence-transformers"]
+    F --> G["Retrieval\ntop-k=5 similarity search\nChromaDB"]
+    D --> G
+    G --> H["Generation\nGroq API + grounded prompt\nretrieved chunks as context"]
+    H --> I["Answer + sources\nGradio UI"]
+```
+
+---
+
 ## Domain
 
 **Northeastern University Housing and Residential Life** — on-campus and university-affiliated housing for Northeastern undergraduates in Boston.
@@ -30,8 +91,7 @@ The system covers 40+ residential communities (traditional, suite, and apartment
 | 8 | Room Rates (2025–2026) | Official NU page | https://housing.northeastern.edu/room-rates/ · `documents/room_rates.txt` |
 | 9 | Residential Utilities | Official NU page | https://housing.northeastern.edu/residential-utilities/ · `documents/residential_utlilies.txt` |
 | 10 | Student Dorm Reviews (RoomSurf) | Unofficial reviews | https://www.roomsurf.com/dorm-reviews/neu · `documents/dorm_review.txt` |
-
-Additional sources collected but not listed above: Fall Move-In/Out (`documents/fall_move_out.txt`).
+| 11 | Fall Move-In/Out | Official NU page | https://housing.northeastern.edu/fall-move-inout/ · `documents/fall_move_out.txt` |
 
 ---
 
@@ -52,9 +112,11 @@ Additional sources collected but not listed above: Fall Move-In/Out (`documents/
 
 ---
 
-## Embedding Model
+## Embedding & Retrieval
 
-**Model used:** `all-MiniLM-L6-v2` via `sentence-transformers`. It is lightweight, runs locally with no API cost, and handles short factual/policy text well — which matches most housing chunks. Each chunk is embedded once at ingest time and stored in a persistent ChromaDB collection (`housing_chunks`).
+**Embedding model:** `all-MiniLM-L6-v2` via `sentence-transformers`. It is lightweight, runs locally with no API cost, and handles short factual/policy text well — which matches most housing chunks. Each chunk is embedded once at ingest time and stored in a persistent ChromaDB collection (`housing_chunks`).
+
+**Retrieval settings:** top-k = **5** chunks per query; cosine distance filter drops chunks with distance ≥ **0.65** before the LLM call. If no chunks pass the filter, the system returns the decline message without calling Groq.
 
 **Production tradeoff reflection:** If cost and latency were not constraints, I would weigh:
 
