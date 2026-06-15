@@ -232,4 +232,3 @@ Record a 3–5 minute demo video covering the items below. Use QuickTime, OBS, o
 4. **Narrate one failure/struggle** — run Q4: "On average, what housing styles are NUin spring returners placed into?" Explain that timeline chunk ranked above statistics chunk (see Failure Case Analysis)
 5. **README walkthrough** — scroll through the Evaluation Report table and Failure Case Analysis sections
 
-Upload the video per your course submission instructions.
