@@ -27,6 +27,21 @@ IN_DOMAIN_TESTS = [
         "expected_source": "dorm_review.txt",
         "must_contain": ["thin", "wall"],
     },
+    {
+        "name": "NUin spring returner placement",
+        "query": "On average, what housing styles are NUin spring returners placed into?",
+        "expected_source": "spring_housing.txt",
+        "must_contain": ["85%", "10%", "5%"],
+    },
+    {
+        "name": "Microwave and outside furniture",
+        "query": (
+            "Can students bring their own microwave or outside furniture "
+            "to traditional or suite-style dorms?"
+        ),
+        "expected_source": "what_to_bring.txt",
+        "must_contain": ["microwave", "outside furniture"],
+    },
 ]
 
 OUT_OF_DOMAIN_TEST = {
