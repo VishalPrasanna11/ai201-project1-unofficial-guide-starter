@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import chromadb
 from chromadb.errors import NotFoundError
 from sentence_transformers import SentenceTransformer
 
+from config import (
+    BATCH_SIZE,
+    CHROMA_DIR,
+    COLLECTION_NAME,
+    DEFAULT_TOP_K,
+    EMBEDDING_MODEL,
+    HYBRID_SEARCH_ENABLED,
+    RETRIEVAL_CANDIDATE_MULTIPLIER,
+    RRF_K,
+)
+from hybrid_search import bm25_search, build_bm25_index, reciprocal_rank_fusion
+from metadata import infer_filters
 from models import Chunk
-
-MODEL_NAME = "all-MiniLM-L6-v2"
-COLLECTION_NAME = "housing_chunks"
-CHROMA_DIR = Path(__file__).parent / "chroma_db"
-DEFAULT_TOP_K = 5
-BATCH_SIZE = 32
+from reranker import rerank
 
 _model: SentenceTransformer | None = None
 _client: chromadb.PersistentClient | None = None
@@ -23,7 +28,7 @@ _client: chromadb.PersistentClient | None = None
 def get_embedding_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        _model = SentenceTransformer(MODEL_NAME)
+        _model = SentenceTransformer(EMBEDDING_MODEL)
     return _model
 
 
@@ -49,7 +54,7 @@ def get_collection(*, reset: bool = False) -> chromadb.Collection:
 
 
 def build_index(chunks: list[Chunk], reset: bool = True) -> int:
-    """Embed all chunks and store them in ChromaDB."""
+    """Embed all chunks and store them in ChromaDB and BM25 index."""
     if not chunks:
         raise ValueError("No chunks to index. Run ingest.build_chunks() first.")
 
@@ -84,24 +89,29 @@ def build_index(chunks: list[Chunk], reset: bool = True) -> int:
         embeddings=embeddings,
     )
 
+    build_bm25_index(chunks, persist=True)
     print(f"Indexed {len(chunks)} chunks into {CHROMA_DIR}/")
     return len(chunks)
 
 
-def retrieve(query: str, k: int = DEFAULT_TOP_K) -> list[dict]:
-    """Return top-k chunks most similar to the query."""
+def _semantic_search(
+    query: str,
+    k: int,
+    where: dict | None = None,
+) -> list[dict]:
     collection = get_collection()
-    if collection.count() == 0:
-        raise RuntimeError("Vector store is empty. Run build_index() first.")
-
     model = get_embedding_model()
     query_embedding = model.encode(query).tolist()
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=k,
-        include=["documents", "metadatas", "distances"],
-    )
+    query_kwargs: dict = {
+        "query_embeddings": [query_embedding],
+        "n_results": k,
+        "include": ["documents", "metadatas", "distances"],
+    }
+    if where:
+        query_kwargs["where"] = where
+
+    results = collection.query(**query_kwargs)
 
     documents = results["documents"][0]
     metadatas = results["metadatas"][0]
@@ -119,6 +129,40 @@ def retrieve(query: str, k: int = DEFAULT_TOP_K) -> list[dict]:
             }
         )
     return hits
+
+
+def retrieve(
+    query: str,
+    k: int = DEFAULT_TOP_K,
+    *,
+    where: dict | None = None,
+    use_hybrid: bool | None = None,
+) -> list[dict]:
+    """Return top-k chunks: metadata filter → hybrid search → re-rank."""
+    if use_hybrid is None:
+        use_hybrid = HYBRID_SEARCH_ENABLED
+
+    candidate_k = min(
+        get_collection().count(),
+        max(k, k * RETRIEVAL_CANDIDATE_MULTIPLIER),
+    )
+
+    effective_where = where if where is not None else infer_filters(query)
+
+    semantic_hits = _semantic_search(query, candidate_k, where=effective_where)
+    if effective_where and len(semantic_hits) < k:
+        semantic_hits = _semantic_search(query, candidate_k, where=None)
+
+    if use_hybrid:
+        keyword_hits = bm25_search(query, k=candidate_k)
+        if keyword_hits:
+            fused = reciprocal_rank_fusion([semantic_hits, keyword_hits], k=candidate_k, rrf_k=RRF_K)
+        else:
+            fused = semantic_hits
+    else:
+        fused = semantic_hits
+
+    return rerank(query, fused, k)
 
 
 def ensure_index() -> None:

@@ -1,0 +1,27 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: connect repo → Render auto-detects this file, or use Manual Deploy with same settings.
+
+services:
+  - type: web
+    name: housingiq
+    runtime: python
+    plan: starter
+    buildCommand: >-
+      pip install -r requirements.txt &&
+      python -c "from ingest import build_chunks, load_documents; from vector_store import build_index; build_index(build_chunks(load_documents()), reset=True)"
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: GROQ_API_KEY
+        sync: false
+    # Optional: uncomment disk + env vars to persist index across deploys
+    # disk:
+    #   name: housingiq-data
+    #   mountPath: /data
+    #   sizeGB: 1
+    # envVars (add alongside GROQ_API_KEY):
+    #   - key: CHROMA_DIR
+    #     value: /data/chroma_db
+    #   - key: BM25_INDEX_PATH
+    #     value: /data/bm25_index.pkl
