@@ -1,13 +1,14 @@
 """Central configuration for the Housing RAG pipeline."""
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent
 DOCUMENTS_DIR = PROJECT_ROOT / "documents"
-CHROMA_DIR = PROJECT_ROOT / "chroma_db"
-BM25_INDEX_PATH = PROJECT_ROOT / "data" / "bm25_index.pkl"
+CHROMA_DIR = Path(os.getenv("CHROMA_DIR", str(PROJECT_ROOT / "chroma_db")))
+BM25_INDEX_PATH = Path(os.getenv("BM25_INDEX_PATH", str(PROJECT_ROOT / "data" / "bm25_index.pkl")))
 
 # Embedding & retrieval
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"

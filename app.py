@@ -1,5 +1,7 @@
 """Gradio web UI for the NU Housing Unofficial Guide."""
 
+import os
+
 import gradio as gr
 
 from query import ask, normalize_content
@@ -53,4 +55,7 @@ demo = gr.ChatInterface(
 )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", 7860)),
+    )

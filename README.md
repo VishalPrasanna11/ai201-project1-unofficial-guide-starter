@@ -22,6 +22,25 @@ python app.py
 
 Open http://localhost:7860 and ask a question. The app calls `ensure_index()` at startup — if `chroma_db/` is empty, it chunks and embeds all 11 documents automatically.
 
+---
+
+## Deploy on Render
+
+1. Push this repo to GitHub.
+2. [Render Dashboard](https://dashboard.render.com) → **New +** → **Blueprint** (uses [`render.yaml`](render.yaml)) or **Web Service** (manual).
+3. Set **`GROQ_API_KEY`** in Environment (required).
+4. Deploy. The build step pre-indexes all 163 chunks; first page load may still take ~30s while the embedding model loads into memory.
+
+| Setting | Value |
+|---------|--------|
+| **Build Command** | `pip install -r requirements.txt && python -c "from ingest import build_chunks, load_documents; from vector_store import build_index; build_index(build_chunks(load_documents()), reset=True)"` |
+| **Start Command** | `python app.py` |
+
+**Notes:**
+- `app.py` binds to `0.0.0.0` and Render's `$PORT` automatically.
+- **Starter plan** (512 MB) recommended minimum; upgrade if the service OOMs on startup.
+- For index persistence across redeploys, attach a [Render persistent disk](https://render.com/docs/disks) at `/data` and set `CHROMA_DIR=/data/chroma_db` and `BM25_INDEX_PATH=/data/bm25_index.pkl`.
+
 **Other commands:**
 
 | Command | Purpose |
@@ -61,21 +80,55 @@ Open http://localhost:7860 and ask a question. The app calls `ensure_index()` at
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A["Document Ingestion\n(.txt files in documents/)\nPython stdlib"] --> B["Chunking\nRecursive + section-aware\nchunking.py"]
-    B --> C["Embedding\nall-MiniLM-L6-v2\nsentence-transformers"]
-    B --> BM25["BM25 Index\nrank-bm25\nhybrid_search.py"]
-    C --> D["Vector Store\nChromaDB\n(persistent collection)"]
-    E["User Question"] --> Meta["Metadata Filter\nmetadata.py"]
-    Meta --> F["Query Embedding\nsentence-transformers"]
-    F --> G["Hybrid Retrieval\nsemantic + BM25 + RRF"]
+flowchart TB
+    subgraph offline ["Index Build (offline)"]
+        direction TB
+        A["Document Ingestion<br/>(.txt files in documents/)<br/>Python stdlib"]
+        B["Chunking<br/>Recursive + section-aware<br/>chunking.py"]
+        C["Embedding<br/>all-MiniLM-L6-v2<br/>sentence-transformers"]
+        BM25["BM25 Index<br/>rank-bm25<br/>hybrid_search.py"]
+        D["Vector Store<br/>ChromaDB<br/>(persistent collection)"]
+
+        A --> B
+        B --> C
+        B --> BM25
+        C --> D
+    end
+
+    subgraph online ["Query Path (online)"]
+        direction TB
+        E["User Question"]
+        Meta["Metadata Filter<br/>metadata.py"]
+        F["Query Embedding<br/>sentence-transformers"]
+        G["Hybrid Retrieval<br/>semantic + BM25 + RRF"]
+        Rerank["Keyword Re-rank<br/>reranker.py"]
+        Filter["Distance Filter<br/>MAX_DISTANCE=0.55"]
+        H["Generation<br/>Groq + grounded prompt<br/>+ chat history"]
+        I["Answer + sources<br/>Gradio ChatInterface"]
+
+        E --> Meta
+        Meta --> F
+        F --> G
+        G --> Rerank
+        Rerank --> Filter
+        Filter --> H
+        H --> I
+    end
+
     D --> G
     BM25 --> G
-    G --> Rerank["Keyword Re-rank\nreranker.py"]
-    Rerank --> Filter["Distance Filter\nMAX_DISTANCE=0.55"]
-    Filter --> H["Generation\nGroq + grounded prompt\n+ chat history"]
     History["Chat History"] --> H
-    H --> I["Answer + sources\nGradio ChatInterface"]
+
+    classDef ingest fill:#E3F2FD,stroke:#1565C0,color:#0D47A1
+    classDef index fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20
+    classDef query fill:#FFF3E0,stroke:#EF6C00,color:#E65100
+    classDef output fill:#F3E5F5,stroke:#7B1FA2,color:#4A148C
+
+    class A,B ingest
+    class C,BM25,D index
+    class E,Meta,F,G,Rerank,Filter,H query
+    class I output
+    class History query
 ```
 
 ---
