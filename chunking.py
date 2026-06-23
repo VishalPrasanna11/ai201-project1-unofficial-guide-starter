@@ -4,12 +4,47 @@ from __future__ import annotations
 
 import re
 
+from config import CHUNK_OVERLAP, CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_LEN
 from models import Chunk
 
-CHUNK_SIZE = 1600  # ~400 tokens
-CHUNK_OVERLAP = 240  # ~60 tokens
-MAX_CHUNK_SIZE = 2048  # ~512 tokens
-MIN_CHUNK_LEN = 50
+SPRING_HOUSING_SECTIONS = [
+    "Housing Statistics",
+    "Program Overview",
+    "How to Apply",
+    "Timeline",
+    "Process",
+    "Housing Types to Expect",
+    "Placement Overview",
+    "University Housing Styles",
+    "Traditional Accommodations",
+    "Suite Style Accommodations",
+    "Apartment Style Accommodations",
+    "Living Learning Communities (LLCs)",
+    "Additional Housing Options",
+    "Medical Accommodations",
+    "All Gender Housing",
+    "Frequently Asked Questions",
+    "Can I choose my residence hall?",
+    "When is move-in?",
+    "When will I know my housing assignment?",
+    "What should I bring when I move in?",
+    "How do I reserve a Microfridge or ship to my room before move in?",
+    "Contact Information",
+]
+
+WHAT_TO_BRING_SECTIONS = [
+    "University-Provided Items",
+    "Packing Recommendations",
+    "Boston Climate",
+    "What You May Want to Bring",
+    "Clothing",
+    "Medicine and Toiletries",
+    "Bedding and Linens",
+    "Room Supplies",
+    "Microwave and Refrigerator",
+    "What NOT to Bring",
+    "Prohibited Items:",
+]
 
 SEPARATORS = ["\n\n", "\n", ". ", " "]
 
@@ -164,6 +199,64 @@ def chunk_room_rates(text: str, source: str) -> list[Chunk]:
     return chunks
 
 
+def chunk_by_known_headers(
+    text: str,
+    source: str,
+    headers: list[str],
+    *,
+    preamble_section: str = "Overview",
+) -> list[Chunk]:
+    """Split a guide document at known section headers so each section is its own chunk."""
+    chunks: list[Chunk] = []
+    idx = 0
+
+    # Build a regex that matches any known header at the start of a line.
+    escaped = [re.escape(header) for header in sorted(headers, key=len, reverse=True)]
+    header_pattern = re.compile(rf"^({'|'.join(escaped)})\s*$", re.MULTILINE)
+
+    matches = list(header_pattern.finditer(text))
+    if not matches:
+        return recursive_chunk(text, source)
+
+    cursor = 0
+    for match in matches:
+        if match.start() > cursor:
+            preamble = text[cursor:match.start()].strip()
+            if preamble and len(preamble) >= MIN_CHUNK_LEN:
+                for chunk in recursive_chunk(preamble, source, section_prefix=preamble_section):
+                    chunk.chunk_index = idx
+                    chunks.append(chunk)
+                    idx += 1
+
+        section_name = match.group(1).strip()
+        next_start = matches[matches.index(match) + 1].start() if matches.index(match) + 1 < len(matches) else len(text)
+        body = text[match.start():next_start].strip()
+        if len(body) >= MIN_CHUNK_LEN:
+            chunks.append(Chunk(text=body, source=source, section=section_name, chunk_index=idx))
+            idx += 1
+        cursor = next_start
+
+    if cursor < len(text):
+        tail = text[cursor:].strip()
+        if tail and len(tail) >= MIN_CHUNK_LEN:
+            for chunk in recursive_chunk(tail, source, section_prefix="Additional"):
+                chunk.chunk_index = idx
+                chunks.append(chunk)
+                idx += 1
+
+    return chunks
+
+
+def chunk_spring_housing(text: str, source: str) -> list[Chunk]:
+    """Section-aware chunking so Housing Statistics and Timeline stay separate."""
+    return chunk_by_known_headers(text, source, SPRING_HOUSING_SECTIONS, preamble_section="Introduction")
+
+
+def chunk_what_to_bring(text: str, source: str) -> list[Chunk]:
+    """Section-aware chunking so microwave/prohibited-item rules are not buried."""
+    return chunk_by_known_headers(text, source, WHAT_TO_BRING_SECTIONS, preamble_section="Overview")
+
+
 def chunk_reviews(text: str, source: str) -> list[Chunk]:
     """One chunk per RoomSurf review; zero overlap."""
     chunks: list[Chunk] = []
@@ -209,6 +302,10 @@ def chunk_document(text: str, filename: str) -> list[Chunk]:
         raw_chunks = chunk_room_rates(text, filename)
     elif filename == "dorm_review.txt":
         raw_chunks = chunk_reviews(text, filename)
+    elif filename == "spring_housing.txt":
+        raw_chunks = chunk_spring_housing(text, filename)
+    elif filename == "what_to_bring.txt":
+        raw_chunks = chunk_what_to_bring(text, filename)
     else:
         raw_chunks = recursive_chunk(text, filename)
 

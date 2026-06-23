@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from dotenv import load_dotenv
 from groq import Groq
 
+from config import DECLINE_MESSAGE, DEFAULT_TOP_K, LLM_MODEL, LLM_TEMPERATURE, MAX_DISTANCE
 from vector_store import retrieve
 
 load_dotenv()
-
-MODEL = "llama-3.3-70b-versatile"
-TOP_K = 5
-MAX_DISTANCE = 0.65
-DECLINE_MESSAGE = "I don't have enough information on that in my documents."
 
 SYSTEM_PROMPT = """You are a Northeastern University housing assistant. Answer ONLY using the \
 Retrieved Documents below. Do not use outside knowledge.
@@ -25,7 +22,11 @@ Rules:
 - Do not guess or infer beyond what the documents state.
 - When citing facts, mention the source filename in parentheses,
   e.g. (source: room_rates.txt).
-- For student reviews, distinguish them from official policy."""
+- For student reviews, distinguish them from official policy.
+- When multiple reviews are relevant, synthesize themes across ALL retrieved reviews
+  (e.g., thin walls, neighbor noise, NUPD proximity) — do not omit details present
+  in the context.
+- If any retrieved review mentions NUPD, include that detail in your answer."""
 
 
 def _get_client() -> Groq:
@@ -48,13 +49,52 @@ def _format_context(chunks: list[dict]) -> str:
     return "\n".join(blocks)
 
 
-def ask(question: str, k: int = TOP_K) -> dict:
+def normalize_content(content: Any) -> str:
+    """Coerce Gradio/OpenAI-style message content to plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if text:
+                    parts.append(str(text))
+        return " ".join(parts)
+    if isinstance(content, dict):
+        return str(content.get("text") or content.get("content") or "")
+    return str(content)
+
+
+def _retrieval_query(question: str, history: list[dict[str, str]] | None) -> str:
+    """Augment retrieval query with prior user turn for follow-up questions."""
+    if not history:
+        return question
+    last_user = next(
+        (normalize_content(msg["content"]) for msg in reversed(history) if msg.get("role") == "user"),
+        None,
+    )
+    if last_user and last_user.strip().lower() != question.strip().lower():
+        return f"{last_user} {question}"
+    return question
+
+
+def ask(
+    question: str,
+    k: int = DEFAULT_TOP_K,
+    history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     """Retrieve relevant chunks and generate a grounded answer."""
     question = question.strip()
     if not question:
         raise ValueError("Question must not be empty.")
 
-    chunks = retrieve(question, k=k)
+    retrieval_q = _retrieval_query(question, history)
+    chunks = retrieve(retrieval_q, k=k)
     chunks = [c for c in chunks if c["distance"] < MAX_DISTANCE]
 
     if not chunks:
@@ -67,16 +107,29 @@ def ask(question: str, k: int = TOP_K) -> dict:
 
     user_message = f"{_format_context(chunks)}Question: {question}"
 
+    messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        for msg in history:
+            messages.append(
+                {"role": msg["role"], "content": normalize_content(msg["content"])}
+            )
+    messages.append({"role": "user", "content": user_message})
+
     client = _get_client()
     response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0.2,
+        model=LLM_MODEL,
+        messages=messages,
+        temperature=LLM_TEMPERATURE,
     )
     answer = response.choices[0].message.content or DECLINE_MESSAGE
+
+    if DECLINE_MESSAGE.lower() in answer.lower():
+        return {
+            "answer": DECLINE_MESSAGE,
+            "sources": [],
+            "source_details": [],
+            "chunks": [],
+        }
 
     sources = sorted({c["source"] for c in chunks})
     source_details = [

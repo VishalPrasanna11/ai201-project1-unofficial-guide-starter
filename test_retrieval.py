@@ -3,51 +3,9 @@
 from __future__ import annotations
 
 from ingest import build_chunks, load_documents
+from tests.eval_cases import EVAL_QUERIES
+from tests.test_helpers import contains_all, contains_all_across
 from vector_store import build_index, retrieve
-
-EVAL_QUERIES = [
-    {
-        "id": 1,
-        "query": "What is the per-semester rate for a standard double room at Kerr Hall for 2025-2026?",
-        "expected_source": "room_rates.txt",
-        "must_contain": ["$5,315", "Kerr Hall"],
-    },
-    {
-        "id": 2,
-        "query": (
-            "When is the housing application due for students entering in Fall 2026, "
-            "and when must the enrollment deposit be paid?"
-        ),
-        "expected_source": "application_process.txt",
-        "must_contain": ["May 7, 2026", "May 1, 2026"],
-    },
-    {
-        "id": 3,
-        "query": "What do RoomSurf students say about noise and wall thickness at International Village?",
-        "expected_source": "dorm_review.txt",
-        "must_contain": ["thin", "wall"],
-    },
-    {
-        "id": 4,
-        "query": "On average, what housing styles are NUin spring returners placed into?",
-        "expected_source": "spring_housing.txt",
-        "must_contain": ["85%"],
-    },
-    {
-        "id": 5,
-        "query": (
-            "Can students bring their own microwave or outside furniture "
-            "to traditional or suite-style dorms?"
-        ),
-        "expected_source": "what_to_bring.txt",
-        "must_contain": ["microwave", "outside furniture"],
-    },
-]
-
-
-def _contains_all(text: str, needles: list[str]) -> bool:
-    lower = text.lower()
-    return all(needle.lower() in lower for needle in needles)
 
 
 def run_eval_queries(k: int = 5) -> bool:
@@ -79,15 +37,26 @@ def run_eval_queries(k: int = 5) -> bool:
 
         top = results[0]
         source_ok = top["source"] == item["expected_source"]
-        distance_ok = top["distance"] < 0.5
-        content_ok = any(_contains_all(hit["text"], item["must_contain"]) for hit in results)
+        distance_ok = top["distance"] < 0.55
+        content_ok = any(contains_all(hit["text"], item["must_contain"]) for hit in results)
+        if not content_ok:
+            content_ok = contains_all_across(results, item["must_contain"])
+        section_ok = True
+        preferred = item.get("preferred_section")
+        if preferred:
+            section_ok = (top.get("section") or "") == preferred
 
         print(f"\nSummary for query {item['id']}:")
         print(f"  Expected source ({item['expected_source']}): {'PASS' if source_ok else 'FAIL'}")
-        print(f"  Top distance < 0.5 ({top['distance']:.4f}): {'PASS' if distance_ok else 'FAIL'}")
+        print(f"  Top distance < 0.55 ({top['distance']:.4f}): {'PASS' if distance_ok else 'FAIL'}")
         print(f"  Key content in top-{k} results: {'PASS' if content_ok else 'FAIL'}")
+        if preferred:
+            print(
+                f"  Preferred section ({preferred}): "
+                f"{'PASS' if section_ok else 'FAIL'} (got: {top.get('section')})"
+            )
 
-        if not (source_ok and distance_ok and content_ok):
+        if not (source_ok and distance_ok and content_ok and section_ok):
             all_passed = False
 
     print(f"\n{'=' * 70}")

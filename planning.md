@@ -61,9 +61,11 @@ Housing info is spread across Housing Online, PDF rate charts, LLC brochures, an
 
 I'm going with **recursive chunking** as the main approach — similar to how you'd chunk API docs where headers and sections give you natural break points. Most of my NU housing sources (application process, university housing, LLCs, utilities, NUin, etc.) are structured that way.
 
-For the two outliers, I'll handle them differently:
+For the outliers and known failure-case files, I'll handle them differently:
 - **RoomSurf reviews** (`dorm_review.txt`) — treat like short Yelp-style reviews: one chunk per review, no overlap. They're already self-contained.
 - **Room rates** (`room_rates.txt`) — one chunk per building (e.g., Kerr Hall + all its rates together). Overlap would just duplicate prices in retrieval.
+- **`spring_housing.txt`** — section-aware splitting at known headers (e.g., "Housing Statistics", "Timeline"). The original recursive split merged statistics with timeline language, causing the NUin placement query to rank the wrong chunk first.
+- **`what_to_bring.txt`** — section-aware splitting at headers like "Microwave and Refrigerator" and "Prohibited Items:". Recursive splitting buried microwave/furniture rules at the bottom of a toiletries chunk.
 
 **How recursive splitting works:** try to split on `\n\n` first (sections/paragraphs), then `\n` (lines), then sentences, then words — only go to the next level if a chunk is still too big.
 
@@ -75,9 +77,24 @@ For the two outliers, I'll handle them differently:
 
 **Expected chunk count:** roughly 80-120 chunks across all documents.
 
-**Final chunk count (after implementation):** 144 chunks from 11 documents (104 from room_rates building entries, 8 dorm reviews, 32 from recursive split on policy/guide files).
+**Final chunk count (v1):** 144 chunks from 11 documents (104 from room_rates building entries, 8 dorm reviews, 32 from recursive split on policy/guide files).
 
-**Reasoning:** Official housing pages read like structured guides, not long unstructured transcripts — recursive fits. Reviews and rate tables need their own rules so I don't split a building name away from its prices or break a student review in half.
+**Final chunk count (production upgrade):** 163 chunks from 11 documents (104 building-rate chunks, 8 dorm reviews, 18 from section-aware `spring_housing.txt`, 8 from section-aware `what_to_bring.txt`, 25 from recursive split on remaining policy/guide files).
+
+**Reasoning:** Official housing pages read like structured guides, not long unstructured transcripts — recursive fits for most files. Reviews and rate tables need their own rules so I don't split a building name away from its prices or break a student review in half. Section-aware splitting is added only where evaluation showed recursive chunking caused retrieval failures (NUin statistics vs. timeline; microwave rules buried under toiletries).
+
+### Chunking Strategy Comparison (stretch)
+
+I'll benchmark two strategies on all 5 evaluation queries using `compare_chunking.py`:
+
+| Strategy | Description |
+|----------|-------------|
+| A — Baseline | Recursive-only for all non-rate/review documents |
+| B — Production | Section-aware (`spring_housing`, `what_to_bring`) + per-building rates + per-review |
+
+**Metrics:** top-1 source match, preferred section match (Q4 → "Housing Statistics", Q5 → "Microwave and Refrigerator"), key content present in top-5.
+
+**Expected outcome:** Strategy B improves Q4 and Q5 retrieval ranking without regressing Q1–Q3. Results will be documented in README.
 
 ---
 
@@ -92,6 +109,16 @@ For the two outliers, I'll handle them differently:
 **Embedding model:** `all-MiniLM-L6-v2` via `sentence-transformers` (already in `requirements.txt`). It's lightweight, runs locally, and handles short factual/policy text well — which matches most of my housing chunks. I'll embed each chunk once at ingest time and store vectors in ChromaDB.
 
 **Top-k:** **5** chunks per query. Housing questions often pull from more than one doc (e.g., NUin placement + LLC info, or building rates + meal plan rules). k=3 felt too tight in early testing scenarios; k=5 gives enough context without flooding the LLM prompt.
+
+**Distance filter:** `MAX_DISTANCE = 0.55` (tightened from 0.65 after evaluation showed irrelevant `room_rates.txt` chunks at distance 0.61 polluting NUin placement queries). Chunks at or above this cosine distance are dropped before the LLM call; if none remain, the system returns the decline message without calling Groq.
+
+**Keyword re-ranking:** After vector search, `reranker.py` applies lightweight domain heuristics — boosting chunks with percentage patterns for placement queries, noise/NUPD terms for review queries, and microwave/prohibited-item sections for packing queries. Fetches `k × 2` candidates, re-ranks, returns top-k.
+
+**Hybrid search (stretch):** Combine semantic search (ChromaDB + MiniLM) with BM25 keyword search (`rank-bm25`) using Reciprocal Rank Fusion (RRF). Helps on keyword-heavy queries: building codes (KER), dollar amounts ($5,315), dates (May 7, 2026). Implemented in `hybrid_search.py`, enabled via `config.HYBRID_SEARCH_ENABLED`.
+
+**Metadata filtering (stretch):** `metadata.py` infers ChromaDB `where` filters from query signals — e.g., "students say" → `dorm_review.txt`, "rate" + building → `room_rates.txt`, "NUin placement" → `spring_housing.txt`. Falls back to unfiltered search if the filtered query returns too few results.
+
+**Configuration:** All tunable values (`MAX_DISTANCE`, `CHUNK_SIZE`, `TOP_K`, `LLM_MODEL`, hybrid/RRF constants) centralized in `config.py` so parameter tuning doesn't require hunting across modules.
 
 **Production tradeoff reflection:** If cost and latency weren't a concern, I'd weigh:
 - **Accuracy on domain text** — a larger model like `e5-large-v2` or an OpenAI embedding API might better match paraphrased student questions ("how much is IV?" → International Village rates).
@@ -132,6 +159,8 @@ For the two outliers, I'll handle them differently:
 
 4. **Cross-document questions** — questions like "What LLC can NUin students join and when is the preference form due?" need chunks from both `spring_housing.txt` and `Living_Learning_Communities.txt`. If top-k is too low or embeddings match only one side, the answer will be incomplete.
 
+5. **Regression risk when tuning parameters** — changing `MAX_DISTANCE`, chunk sizes, or re-ranker boosts can fix one query while breaking another. Mitigation: convert `test_retrieval.py` / `test_generation.py` into pytest suites with programmatic assertions and run in CI on every change.
+
 ---
 
 ## Architecture
@@ -144,22 +173,29 @@ For the two outliers, I'll handle them differently:
 
 ```mermaid
 flowchart LR
-    A["Document Ingestion\n(.txt files in documents/)\nPython stdlib"] --> B["Chunking\nRecursive split + special rules\nLangChain or custom Python"]
+    A["Document Ingestion\n(.txt files in documents/)\nPython stdlib"] --> B["Chunking\nRecursive + section-aware\nchunking.py"]
     B --> C["Embedding\nall-MiniLM-L6-v2\nsentence-transformers"]
+    B --> BM25["BM25 Index\nrank-bm25\nhybrid_search.py"]
     C --> D["Vector Store\nChromaDB\n(persistent collection)"]
-    E["User Question"] --> F["Query Embedding\nsentence-transformers"]
-    F --> G["Retrieval\ntop-k=5 similarity search\nChromaDB"]
+    E["User Question"] --> Meta["Metadata Filter\nmetadata.py"]
+    Meta --> F["Query Embedding\nsentence-transformers"]
+    F --> G["Hybrid Retrieval\nsemantic + BM25 + RRF"]
     D --> G
-    G --> H["Generation\nGroq API + grounded prompt\nretrieved chunks as context"]
-    H --> I["Answer + sources\nGradio or Streamlit UI"]
+    BM25 --> G
+    G --> Rerank["Keyword Re-rank\nreranker.py"]
+    Rerank --> Filter["Distance Filter\nMAX_DISTANCE=0.55"]
+    Filter --> H["Generation\nGroq + grounded prompt\n+ chat history"]
+    History["Chat History"] --> H
+    H --> I["Answer + sources\nGradio ChatInterface"]
 ```
 
 **Pipeline summary:**
 1. **Ingestion** — read plain-text files from `documents/`, attach metadata (source filename, section).
-2. **Chunking** — recursive split (400 tokens, 60 overlap) with per-building and per-review exceptions.
-3. **Embedding + store** — embed chunks with MiniLM; persist in ChromaDB with metadata for citation.
-4. **Retrieval** — embed user query, fetch top-5 similar chunks.
-5. **Generation** — send chunks + question to Groq with a strict grounding prompt; return answer with source filenames.
+2. **Chunking** — recursive split (400 tokens, 60 overlap) with per-building, per-review, and section-aware exceptions for `spring_housing.txt` and `what_to_bring.txt`.
+3. **Embedding + store** — embed chunks with MiniLM; persist in ChromaDB with metadata; build BM25 index in parallel.
+4. **Retrieval** — infer metadata filters, hybrid search (semantic + BM25 + RRF), keyword re-rank, distance filter.
+5. **Generation** — send chunks + question + optional chat history to Groq with a strict grounding prompt; return answer with source filenames.
+6. **Testing** — pytest suites with CI (fast unit/retrieval tests on every push; integration tests with Groq API key).
 
 ---
 
@@ -195,3 +231,85 @@ flowchart LR
 - **Input:** Evaluation Plan, Anticipated Challenges, Architecture stage 5, Groq API setup from `.env.example`
 - **Expected output:** grounded RAG pipeline (Groq LLM + system prompt), simple Gradio/Streamlit chat UI, source attribution in responses
 - **Verify:** run all 5 evaluation questions end-to-end; compare answers to expected answers table; log when retrieval is partial or off-target
+
+---
+
+## Production Upgrade (post-grading feedback)
+
+> Score: 22/24. This section documents the production-grade improvements planned after grading feedback and stretch goal requirements.
+
+### Grader feedback to address
+
+| Feedback area | Action |
+|---------------|--------|
+| Testing not systematic | Convert eval scripts to pytest with `assert` statements; add GitHub Actions CI |
+| Magic numbers scattered | Centralize in `config.py` (already started) |
+| README missing sample chunks | Add labeled sample chunks section with 3–5 examples |
+| README missing out-of-scope example | Add dining-hall refusal example with decline message |
+| README missing interaction transcript | Add full query → answer → sources exchange |
+| Stretch: hybrid search | BM25 + semantic + RRF in `hybrid_search.py` |
+| Stretch: metadata filtering | Query-driven ChromaDB `where` filters in `metadata.py` |
+| Stretch: chunking comparison | `compare_chunking.py` benchmark Strategy A vs B |
+| Stretch: conversational memory | `gr.ChatInterface` + history-aware `ask()` in `query.py` |
+
+### Testing plan
+
+```
+tests/
+  conftest.py          # session fixture: build + index chunks once
+  eval_cases.py        # shared 5 eval queries + out-of-domain case
+  test_chunking.py     # Kerr Hall intact, section splits, review count
+  test_retrieval.py    # parameterized: source, section, content assertions
+  test_hybrid_search.py
+  test_metadata.py
+  test_generation.py   # @pytest.mark.integration, skipif no GROQ_API_KEY
+```
+
+**Key retrieval assertions:**
+- Q4: top hit `section == "Housing Statistics"` (resolves original failure case)
+- Q5: top hit `section == "Microwave and Refrigerator"`
+- Out-of-domain: exact decline message, no sources, Groq not called
+
+**CI:** `.github/workflows/ci.yml` — fast tests on every push; optional integration job when `GROQ_API_KEY` secret is set.
+
+### Stretch feature: Hybrid search
+
+- **Library:** `rank-bm25` for BM25Okapi index over tokenized chunk texts
+- **Fusion:** Reciprocal Rank Fusion — `score(doc) = sum(1 / (k_rrf + rank))` across semantic and BM25 result lists
+- **When it helps:** exact keyword matches (building codes, dollar amounts, dates) that pure embedding similarity may miss
+- **Verify:** Q1 still returns Kerr Hall #1; Q4 still returns Housing Statistics #1
+
+### Stretch feature: Metadata filtering
+
+`infer_filters(query)` returns optional ChromaDB `where` clause:
+
+| Query signal | Filter |
+|--------------|--------|
+| "RoomSurf", "students say", "review" | `source = dorm_review.txt` |
+| "rate", "per-semester", "$" | `source = room_rates.txt` |
+| "NUin", "spring returner", "placement" | `source = spring_housing.txt` |
+| "microwave", "bring", "prohibited" | `source = what_to_bring.txt` |
+| "application", "deadline", "deposit" | `source = application_process.txt` |
+
+Fallback to unfiltered search if filtered results are insufficient.
+
+### Stretch feature: Conversational memory
+
+- **UI:** Migrate `app.py` from single-turn `gr.Blocks` to `gr.ChatInterface`
+- **Retrieval:** For follow-up questions, embed `"{last_user_message} {current_question}"` to resolve pronouns ("What about triple rooms?" after Kerr Hall question)
+- **Generation:** Pass prior turns as Groq chat messages for coherent multi-turn answers
+- **Verify:** two-turn test — turn 1 asks about Kerr Hall doubles; turn 2 asks about triple rooms and retrieves Kerr Hall triple rate ($5,205)
+
+### AI Tool Plan — Production upgrade
+
+**Instance 3 — Testing and CI:**
+- **Tool:** Cursor
+- **Input:** Existing eval queries, grader feedback on pytest, `config.py` structure
+- **Expected output:** `tests/` package, `.github/workflows/ci.yml`, pytest markers for integration tests
+- **Verify:** `pytest -m "not integration"` passes locally and in CI
+
+**Instance 4 — Stretch features:**
+- **Tool:** Cursor
+- **Input:** Retrieval Approach (hybrid, metadata), Architecture diagram, Conversational memory spec above
+- **Expected output:** `hybrid_search.py`, `metadata.py`, `compare_chunking.py`, updated `query.py` + `app.py`
+- **Verify:** all 5 eval queries pass; chunking comparison shows Strategy B wins Q4/Q5; multi-turn chat resolves follow-ups

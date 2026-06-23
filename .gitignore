@@ -18,6 +18,7 @@ chroma/
 
 # Generated cleaned documents (Milestone 3)
 data/cleaned/
+data/bm25_index.pkl
 
 # macOS
 .DS_Store
